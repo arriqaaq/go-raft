@@ -1,4 +1,4 @@
-# My project's README
+# Raft Dictionary
 
 States of server:
 
@@ -6,6 +6,3 @@ States of server:
 2) Follower
 3) Candidate
 
-
-Terms:
-# go-raft
