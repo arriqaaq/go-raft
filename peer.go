@@ -12,6 +12,7 @@ type Peer struct {
 	connectionString  string `json:"connectionString"`
 	mutex             sync.RWMutex
 	heartBeatInterval time.Duration
+	stopChan          chan bool
 }
 
 func (p *Peer) Name() string {
@@ -30,8 +31,14 @@ func (p *Peer) sendVoteRequest(req *RequestVoteRequest, c chan *RequestVoteRespo
 }
 
 func (p *Peer) startHeartBeat() {
-	// go p.heartbeat()
-	p.heartbeat()
+	p.stopChan = make(chan bool)
+	go p.heartbeat()
+	// p.heartbeat()
+}
+
+// Stops the peer heartbeat.
+func (p *Peer) stopHeartbeat() {
+	p.stopChan <- true
 }
 
 func (p *Peer) heartbeat() {
@@ -48,6 +55,7 @@ func (p *Peer) heartbeat() {
 				}
 				resp := p.server.transporter.SendAppendEntriesRequest(p.server, p, newAERequest)
 				if resp != nil {
+					p.server.events <- resp
 					if resp.Success {
 						log.Println("heartbeat success")
 					}
@@ -55,6 +63,8 @@ func (p *Peer) heartbeat() {
 					log.Println("heartbeat failed")
 				}
 			}
+		case <-p.stopChan:
+			return
 		}
 	}
 }

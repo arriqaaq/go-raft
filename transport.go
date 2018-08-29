@@ -65,7 +65,6 @@ func (t *HTTPTransporter) Install(server *Server, mux HTTPMuxer) {
 //
 func (t *HTTPTransporter) appendEntriesHandler(server *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Println(server.Name(), "/appendEntries")
 
 		reqBody, _ := ioutil.ReadAll(r.Body)
 
@@ -74,6 +73,7 @@ func (t *HTTPTransporter) appendEntriesHandler(server *Server) http.HandlerFunc 
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
+		log.Println(server.Name(), "/appendEntries", req.LeaderID)
 
 		resp := server.AppendEntries(req)
 		respBody, _ := json.Marshal(resp)
@@ -87,7 +87,6 @@ func (t *HTTPTransporter) appendEntriesHandler(server *Server) http.HandlerFunc 
 // Handles incoming RequestVote requests.
 func (t *HTTPTransporter) requestVoteHandler(server *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Println(server.Name(), "/requestVote")
 
 		reqBody, _ := ioutil.ReadAll(r.Body)
 
@@ -96,6 +95,7 @@ func (t *HTTPTransporter) requestVoteHandler(server *Server) http.HandlerFunc {
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
+		log.Println(req.CandidateName, "/requestVote")
 
 		resp := server.RequestVote(req)
 		respBody, _ := json.Marshal(resp)
@@ -117,7 +117,7 @@ func (t *HTTPTransporter) SendVoteRequest(server *Server, peer *Peer, req *Reque
 	b.Write(reqBody)
 
 	url := fmt.Sprintf("%s%s", peer.connectionString, t.RequestVotePath())
-	log.Println("POST", url)
+	// log.Println("POST", url)
 
 	httpResp, respErr := t.httpClient.Post(url, "application/json", &b)
 	if httpResp == nil || respErr != nil {
@@ -150,7 +150,7 @@ func (t *HTTPTransporter) SendAppendEntriesRequest(server *Server, peer *Peer, r
 	b.Write(reqBody)
 
 	url := fmt.Sprintf("%s%s", peer.connectionString, t.AppendEntriesPath())
-	log.Println("POST", url)
+	// log.Println("POST", url)
 
 	httpResp, err := t.httpClient.Post(url, "application/json", &b)
 	if httpResp == nil || err != nil {
@@ -166,7 +166,7 @@ func (t *HTTPTransporter) SendAppendEntriesRequest(server *Server, peer *Peer, r
 		log.Println("transporter.ae.decoding.error:", err)
 		return nil
 	}
-	log.Println("response macha: ", string(respBody), url)
+	// log.Println("response macha: ", string(respBody), url)
 
 	return resp
 }

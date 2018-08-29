@@ -19,10 +19,8 @@ const (
 const (
 	// DefaultHeartbeatInterval is the interval that the leader will send
 	// AppendEntriesRequests to followers to maintain leadership.
-	// DefaultHeartbeatInterval = 50 * time.Millisecond
-	DefaultHeartbeatInterval = 100 * time.Millisecond
-	DefaultElectionTimeout   = 150 * time.Millisecond
-	MinimumElectionTimeoutMS = 1000 * time.Millisecond
+	DefaultHeartbeatInterval = 50 * time.Millisecond
+	MinimumElectionTimeoutMS = 3000 * time.Millisecond
 	MaximumElectionTimeoutMS = 2 * MinimumElectionTimeoutMS
 )
 
@@ -60,9 +58,10 @@ func NewServer(name string, transporter *HTTPTransporter, connectionString strin
 		state:             FOLLOWER,
 		peers:             make(map[string]*Peer),
 		exitChannel:       make(chan struct{}),
-		ElectionTimeOut:   DefaultElectionTimeout,
+		stopChan:          make(chan bool),
 		HeartBeatInterval: DefaultHeartbeatInterval,
 		connectionString:  connectionString,
+		events:            make(chan interface{}),
 	}
 	s.resetElectionTimeout()
 
@@ -92,11 +91,13 @@ type Server struct {
 	transporter *HTTPTransporter
 
 	HeartBeatInterval time.Duration
-	ElectionTimeOut   time.Duration
 
 	connectionString string
 	electionClock    <-chan time.Time
 
+	events chan interface{}
+
+	stopChan    chan bool
 	exitChannel chan struct{}
 }
 
@@ -116,8 +117,7 @@ func (s *Server) AddPeer(name, connectionString string) {
 }
 
 func (s *Server) RequestVote(req *RequestVoteRequest) RequestVoteResponse {
-	// log.Println("req:term: ", req.CandidateName, req.Term)
-	// log.Println("curr:term: ", req.CandidateName, s.currentTerm)
+	// log.Println("req:vote: ", req.CandidateName, req.Term)
 
 	if req.Term < s.currentTerm {
 		resp := RequestVoteResponse{}
@@ -127,11 +127,11 @@ func (s *Server) RequestVote(req *RequestVoteRequest) RequestVoteResponse {
 	}
 
 	if req.Term > s.currentTerm {
-		s.currentTerm = req.Term
-		log.Println("term-change: ", req.Term, s.state)
+		// log.Println("term-change: ", req.Term, s.state)
+		s.updateCurrentTerm(req.Term, FOLLOWER)
 		// Update current term
 	} else if s.votedFor != req.CandidateName || s.votedFor != "" {
-		log.Println("self-request: ", req.Term)
+		// log.Println("self-request: ", req.Term)
 		resp := RequestVoteResponse{}
 		resp.Term = s.currentTerm
 		resp.VoteGranted = false
@@ -147,19 +147,31 @@ func (s *Server) RequestVote(req *RequestVoteRequest) RequestVoteResponse {
 
 	return resp
 }
+
 func (s *Server) AppendEntries(req *AppendEntriesRequest) AppendEntriesResponse {
-	if len(req.Entries) == 0 {
-		log.Println("entry check: ", req.Term, s.currentTerm)
-		if req.Term > s.currentTerm {
-			s.currentTerm = req.Term
-			s.state = FOLLOWER
-			// log.Fatal("state changed: ", s.state)
-			log.Println("state changed: ", s.state)
-		}
+	log.Println("entry check: ", req.Term, s.currentTerm, s.state)
+	if req.Term > s.currentTerm {
+		s.updateCurrentTerm(req.Term, FOLLOWER)
+		// log.Println("state changed: ", s.state)
 	}
-	return AppendEntriesResponse{}
+	s.resetElectionTimeout()
+
+	return AppendEntriesResponse{
+		Term: s.currentTerm,
+	}
 }
 
+func (s *Server) updateCurrentTerm(term int, state ServerState) {
+	// log.Println("updating term")
+	if s.state == LEADER {
+		s.stopChan <- true
+		for _, peer := range s.peers {
+			peer.stopHeartbeat()
+		}
+	}
+	s.currentTerm = term
+	s.state = state
+}
 func (s *Server) Run() {
 	// log.Println("state: ", s.state)
 	for {
@@ -189,16 +201,29 @@ func (s *Server) resetElectionTimeout() {
 }
 
 func (s *Server) runFollower() {
-	log.Println("follower: ", s.currentTerm)
+	log.Println("I am a FOLLOWER!!!", s.currentTerm)
+
 	for {
 		select {
+		case e := <-s.events:
+			switch ev := e.(type) {
+			case *AppendEntriesRequest:
+				continue
+			case *AppendEntriesResponse:
+				if ev.Term > s.currentTerm {
+					s.updateCurrentTerm(ev.Term, FOLLOWER)
+				}
+				s.resetElectionTimeout()
+			}
 		case <-s.electionClock:
+			log.Println("election timeout: ", s.currentTerm)
 			s.currentTerm++
-			log.Println("term-increment-1: ", s.currentTerm)
+			// log.Println("term-increment-1: ", s.currentTerm)
 			s.votedFor = ""
 			s.leader = ""
 			s.state = CANDIDATE
 			s.resetElectionTimeout()
+			log.Println("exit")
 			return
 		}
 
@@ -208,10 +233,14 @@ func (s *Server) runFollower() {
 
 func (s *Server) Quorom() int {
 	// implement locking everywhere
-	return len(s.peers)/2 + 1
+	if len(s.peers) > 1 {
+		return len(s.peers)/2 + 1
+	}
+	return 2
 }
 
 func (s *Server) runCandidate() {
+	log.Println("I am a CANDIDATE!!!")
 	var respChan chan *RequestVoteResponse
 
 	selfVote := true
@@ -220,7 +249,7 @@ func (s *Server) runCandidate() {
 	for s.state == CANDIDATE {
 		if selfVote {
 			s.currentTerm++
-			log.Println("term-increment-2: ", s.currentTerm)
+			// log.Println("term-increment-2: ", s.currentTerm)
 			s.votedFor = s.name
 
 			respChan = make(chan *RequestVoteResponse, len(s.peers))
@@ -229,8 +258,12 @@ func (s *Server) runCandidate() {
 					Term:          s.currentTerm,
 					CandidateName: s.name,
 				}
-
-				go peer.sendVoteRequest(newVoteReq, respChan)
+				// avoiding pointer overwrite in goroutines loop
+				np := peer
+				np.sendVoteRequest(newVoteReq, respChan)
+				// go func(p *Peer) {
+				// 	p.sendVoteRequest(newVoteReq, respChan)
+				// }(peer)
 			}
 
 			totalVotes += 1
@@ -239,7 +272,7 @@ func (s *Server) runCandidate() {
 
 		}
 
-		log.Println("candidate: ", s.currentTerm, s.state)
+		// log.Println("candidate: ", s.currentTerm)
 
 		if totalVotes >= s.Quorom() {
 			log.Println("got in one vote", totalVotes, s.Quorom())
@@ -253,8 +286,7 @@ func (s *Server) runCandidate() {
 
 			select {
 			case <-s.electionClock:
-				s.currentTerm++
-				log.Println("term-increment-3: ", s.currentTerm)
+				// log.Println("term-increment-3: ", s.currentTerm)
 				s.votedFor = ""
 				selfVote = true
 				s.resetElectionTimeout()
@@ -262,6 +294,13 @@ func (s *Server) runCandidate() {
 
 			case r := <-respChan:
 				{
+					if r.Term > s.currentTerm {
+						s.leader = ""
+						s.state = FOLLOWER
+						return
+					} else if r.Term < s.currentTerm {
+						continue
+					}
 
 					if r.VoteGranted {
 						totalVotes++
@@ -277,6 +316,18 @@ func (s *Server) runCandidate() {
 					}
 
 				}
+			case e := <-s.events:
+				switch ev := e.(type) {
+				case *AppendEntriesRequest:
+					log.Println("unexpected rquest")
+				case *AppendEntriesResponse:
+					log.Println("candidate append response")
+					if ev.Term > s.currentTerm {
+						s.updateCurrentTerm(ev.Term, FOLLOWER)
+					}
+					// s.resetElectionTimeout()
+
+				}
 
 			}
 		}
@@ -285,7 +336,7 @@ func (s *Server) runCandidate() {
 }
 
 func (s *Server) runLeader() {
-	log.Println("leader: ", s.currentTerm, s.state)
+	log.Println("I am a LEADER!!!", s.currentTerm)
 	for _, peer := range s.peers {
 		// go peer.startHeartBeat()
 		peer.startHeartBeat()
@@ -293,11 +344,9 @@ func (s *Server) runLeader() {
 	for {
 
 		select {
-		case <-s.electionClock:
-			s.currentTerm++
-			log.Println("term-increment-4: ", s.currentTerm)
-			s.votedFor = ""
-			s.resetElectionTimeout()
+		case <-s.stopChan:
+			s.state = FOLLOWER
+			log.Println("exiting as leader")
 			return
 		}
 	}
